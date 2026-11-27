@@ -10,6 +10,7 @@ import {
 import {
   AlertTriangle,
   Anchor,
+  BookOpen,
   Camera,
   Car,
   ClipboardCheck,
@@ -21,13 +22,20 @@ import {
   MapPin,
   Maximize2,
   Megaphone,
+  Minimize2,
   Navigation,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Phone,
+  Plus,
   Radio,
   Route as RouteIcon,
   Search,
   Shield,
   Skull,
+  Trash2,
   Truck,
   X,
 } from 'lucide-react';
@@ -89,7 +97,9 @@ export type TacticalMapMode =
   | 'inspect'
   | 'mark_incident'
   | 'mark_patrol'
-  | 'relocate_commission';
+  | 'relocate_commission'
+  | 'relocate_unit'
+  | 'create_unit';
 
 export interface MapLayerVisibility {
   boundaries: boolean;
@@ -128,13 +138,23 @@ interface TacticalMapProps {
   onMapClickForIncident: (coords: { lat: number; lng: number }, defaultTipo?: IncidentType, cuadrante?: CuadrantePaz) => void;
   onMapClickForPatrol: (coords: { lat: number; lng: number }, cuadrante?: CuadrantePaz) => void;
   onMapClickForRelocate: (coords: { lat: number; lng: number }) => void;
+  relocatingUnit?: ZoneUnit | null;
+  onMapClickForRelocateUnit?: (coords: { lat: number; lng: number }) => void;
+  onMapClickForCreateUnit?: (coords: { lat: number; lng: number }) => void;
   onEditGangZone?: (zone: GangZone) => void;
   onEditFriendlyForce?: (force: FriendlyForce) => void;
   onEditZoneUnit?: (unit: ZoneUnit) => void;
+  onStartRelocateZoneUnit?: (unit: ZoneUnit) => void;
+  onDeleteZoneUnit?: (unit: ZoneUnit) => void;
   onDeployCommissionAtUnit?: (unit: ZoneUnit) => void;
   canOperate?: boolean;
   canModerateIntelligence?: boolean;
   canConfigureStructure?: boolean;
+  showLeftPanel?: boolean;
+  showRightPanel?: boolean;
+  onToggleLeftPanel?: () => void;
+  onToggleRightPanel?: () => void;
+  onToggleWideMap?: () => void;
 }
 
 const DEFAULT_CENTER = { lat: 9.385, lng: -70.64 };
@@ -510,18 +530,29 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   onMapClickForIncident,
   onMapClickForPatrol,
   onMapClickForRelocate,
+  relocatingUnit = null,
+  onMapClickForRelocateUnit,
+  onMapClickForCreateUnit,
   onEditGangZone,
   onEditFriendlyForce,
   onEditZoneUnit,
+  onStartRelocateZoneUnit,
+  onDeleteZoneUnit,
   onDeployCommissionAtUnit,
   canOperate = true,
   canModerateIntelligence = false,
   canConfigureStructure = true,
+  showLeftPanel = true,
+  showRightPanel = true,
+  onToggleLeftPanel,
+  onToggleRightPanel,
+  onToggleWideMap,
 }) => {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const [mapTypeId, setMapTypeId] = useState<'hybrid' | 'roadmap' | 'terrain'>('hybrid');
   const [activePopup, setActivePopup] = useState<ActivePopup>(null);
   const [deviationBannerCollapsed, setDeviationBannerCollapsed] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
 
   const commissionDeviations = useMemo(() => {
     const list: CommissionDeviationInfo[] = [];
@@ -673,9 +704,28 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         return;
       }
 
+      if (mapMode === 'relocate_unit' && onMapClickForRelocateUnit) {
+        const clamped = clampTrujilloCoords(latLng.lat, latLng.lng);
+        onMapClickForRelocateUnit(clamped);
+        return;
+      }
+
+      if (mapMode === 'create_unit' && onMapClickForCreateUnit) {
+        const clamped = clampTrujilloCoords(latLng.lat, latLng.lng);
+        onMapClickForCreateUnit(clamped);
+        return;
+      }
+
       setActivePopup(null);
     },
-    [mapMode, onMapClickForIncident, onMapClickForPatrol, onMapClickForRelocate]
+    [
+      mapMode,
+      onMapClickForIncident,
+      onMapClickForPatrol,
+      onMapClickForRelocate,
+      onMapClickForRelocateUnit,
+      onMapClickForCreateUnit,
+    ]
   );
 
   const handleJumpSector = (lat: number, lng: number) => {
@@ -753,6 +803,22 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               >
                 <ClipboardCheck className="w-3.5 h-3.5" />
                 {mapMode === 'mark_patrol' ? 'Cancelar Patrullaje' : 'Punto Patrullado'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  onMapModeChange(mapMode === 'create_unit' ? 'inspect' : 'create_unit')
+                }
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  mapMode === 'create_unit'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-[#192332] text-indigo-200 hover:bg-[#223044] border border-slate-700/80'
+                }`}
+                title="Toca el mapa para crear una nueva Compañía o Puesto / PAC del CZGNB-23"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                {mapMode === 'create_unit' ? 'Cancelar Cía/Puesto' : 'Cía / Puesto'}
               </button>
 
               <button
@@ -897,6 +963,109 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setShowLegend((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              showLegend
+                ? 'bg-sky-700/90 border-sky-400/70 text-white'
+                : 'bg-[#192332] border-slate-700/80 text-slate-200 hover:bg-[#223044]'
+            }`}
+            title={showLegend ? 'Ocultar leyenda del mapa' : 'Mostrar leyenda del mapa'}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Leyenda
+          </button>
+
+          {(onToggleLeftPanel || onToggleRightPanel || onToggleWideMap) && (
+            <div className="hidden lg:flex items-center bg-[#0B1117] border border-slate-800 rounded-md p-0.5 gap-0.5">
+              {onToggleLeftPanel && (
+                <button
+                  type="button"
+                  onClick={onToggleLeftPanel}
+                  className={`inline-flex items-center justify-center p-1.5 rounded transition-colors cursor-pointer ${
+                    showLeftPanel
+                      ? 'text-slate-300 hover:text-white hover:bg-[#192332]'
+                      : 'bg-emerald-700/80 text-white'
+                  }`}
+                  title={
+                    showLeftPanel
+                      ? 'Ocultar columna izquierda (Comisiones)'
+                      : 'Mostrar columna izquierda (Comisiones)'
+                  }
+                  aria-label={
+                    showLeftPanel
+                      ? 'Ocultar columna izquierda'
+                      : 'Mostrar columna izquierda'
+                  }
+                >
+                  {showLeftPanel ? (
+                    <PanelLeftClose className="w-3.5 h-3.5" />
+                  ) : (
+                    <PanelLeftOpen className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
+
+              {onToggleWideMap && (
+                <button
+                  type="button"
+                  onClick={onToggleWideMap}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    !showLeftPanel && !showRightPanel
+                      ? 'bg-emerald-700/90 text-white'
+                      : 'text-slate-200 hover:bg-[#192332]'
+                  }`}
+                  title={
+                    !showLeftPanel && !showRightPanel
+                      ? 'Mostrar nuevamente las columnas laterales'
+                      : 'Ocultar ambas columnas laterales para ampliar el mapa'
+                  }
+                >
+                  {!showLeftPanel && !showRightPanel ? (
+                    <>
+                      <Minimize2 className="w-3.5 h-3.5" />
+                      Restaurar
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      Ampliar
+                    </>
+                  )}
+                </button>
+              )}
+
+              {onToggleRightPanel && (
+                <button
+                  type="button"
+                  onClick={onToggleRightPanel}
+                  className={`inline-flex items-center justify-center p-1.5 rounded transition-colors cursor-pointer ${
+                    showRightPanel
+                      ? 'text-slate-300 hover:text-white hover:bg-[#192332]'
+                      : 'bg-emerald-700/80 text-white'
+                  }`}
+                  title={
+                    showRightPanel
+                      ? 'Ocultar columna derecha (Detalle)'
+                      : 'Mostrar columna derecha (Detalle)'
+                  }
+                  aria-label={
+                    showRightPanel
+                      ? 'Ocultar columna derecha'
+                      : 'Mostrar columna derecha'
+                  }
+                >
+                  {showRightPanel ? (
+                    <PanelRightClose className="w-3.5 h-3.5" />
+                  ) : (
+                    <PanelRightOpen className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -908,12 +1077,16 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               ? 'bg-amber-950/90 border-amber-500/40 text-amber-100'
               : mapMode === 'mark_patrol'
                 ? 'bg-teal-950/90 border-teal-500/40 text-teal-100'
-                : 'bg-sky-950/90 border-sky-500/40 text-sky-100'
+                : mapMode === 'create_unit' || mapMode === 'relocate_unit'
+                  ? 'bg-indigo-950/90 border-indigo-400/50 text-indigo-100'
+                  : 'bg-sky-950/90 border-sky-500/40 text-sky-100'
           }`}
         >
           <span className="flex items-center gap-2">
             {mapMode === 'mark_patrol' ? (
               <ClipboardCheck className="w-4 h-4 shrink-0" />
+            ) : mapMode === 'create_unit' ? (
+              <Plus className="w-4 h-4 shrink-0" />
             ) : (
               <Crosshair className="w-4 h-4 shrink-0" />
             )}
@@ -921,7 +1094,11 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               ? 'Toca cualquier punto del mapa para georreferenciar una nueva novedad criminal y adjuntar foto con coordenadas.'
               : mapMode === 'mark_patrol'
                 ? 'Toca cualquier punto del mapa para registrar un sector patrullado, lo observado y adjuntar foto del sitio.'
-                : 'Toca la nueva posición sobre el mapa para actualizar en tiempo real las coordenadas de la comisión seleccionada.'}
+                : mapMode === 'create_unit'
+                  ? 'Toca el punto exacto del mapa donde deseas crear la nueva Compañía o Puesto / PAC del CZGNB-23.'
+                  : mapMode === 'relocate_unit'
+                    ? `Reubicando ${relocatingUnit ? `${relocatingUnit.codigo} (${relocatingUnit.nombre})` : 'unidad seleccionada'}: toca la nueva posición exacta en el mapa.`
+                    : 'Toca la nueva posición sobre el mapa para actualizar en tiempo real las coordenadas de la comisión seleccionada.'}
           </span>
           <button
             type="button"
@@ -1074,18 +1251,22 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
                   .replace(/^Puesto\s+(GNB|Rural|DESUR)\s+/i, '')
                   .replace(/^Sede\s+/i, '')
                   .slice(0, 24);
+                const isRelocatingThis =
+                  mapMode === 'relocate_unit' && relocatingUnit?.id === unit.id;
                 return (
                   <AdvancedMarker
                     key={unit.id}
                     position={{ lat: unit.lat, lng: unit.lng }}
                     zIndex={
-                      unit.nivel === 'comando_zona'
-                        ? 65
-                        : unit.nivel === 'destacamento'
-                          ? 58
-                          : isCompania
-                            ? 28
-                            : 24
+                      isRelocatingThis
+                        ? 88
+                        : unit.nivel === 'comando_zona'
+                          ? 65
+                          : unit.nivel === 'destacamento'
+                            ? 58
+                            : isCompania
+                              ? 28
+                              : 24
                     }
                     onClick={() => setActivePopup({ kind: 'zone_unit', item: unit })}
                     title={`${meta.shortLabel} · ${unit.codigo} — ${unit.nombre}`}
@@ -1100,7 +1281,11 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
                             ? 'px-2 py-0.5 text-[10px]'
                             : 'px-1.5 py-0.5 text-[9px] opacity-95'
                       } ${unit.estadoOperativo === 'inactivo' ? 'opacity-50 grayscale' : ''} ${
-                        unit.estadoOperativo === 'alerta' ? 'ring-2 ring-amber-400 animate-pulse' : ''
+                        isRelocatingThis
+                          ? 'ring-4 ring-indigo-400 scale-110 animate-pulse'
+                          : unit.estadoOperativo === 'alerta'
+                            ? 'ring-2 ring-amber-400 animate-pulse'
+                            : ''
                       }`}
                     >
                       <Shield className={isHq ? 'w-3.5 h-3.5 shrink-0' : 'w-2.5 h-2.5 shrink-0'} />
@@ -1587,6 +1772,23 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
                             </button>
                           )}
                           {canOperate &&
+                            onStartRelocateZoneUnit &&
+                            (canModerateIntelligence || u.ownerId === currentUserUid) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const latest =
+                                    zoneUnits.find((z) => z.id === u.id) ?? u;
+                                  setActivePopup(null);
+                                  onStartRelocateZoneUnit(latest);
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-700 text-white font-semibold rounded hover:bg-indigo-800 cursor-pointer"
+                              >
+                                <Crosshair className="w-3 h-3" />
+                                Reubicar
+                              </button>
+                            )}
+                          {canOperate &&
                             onEditZoneUnit &&
                             (canModerateIntelligence || u.ownerId === currentUserUid) && (
                               <button
@@ -1601,6 +1803,25 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
                               >
                                 <Edit3 className="w-3 h-3" />
                                 Editar
+                              </button>
+                            )}
+                          {onDeleteZoneUnit &&
+                            !u.id.startsWith('cz23_ref_') &&
+                            u.nivel !== 'comando_zona' &&
+                            (canConfigureStructure ||
+                              (canModerateIntelligence && u.ownerId === currentUserUid)) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const latest =
+                                    zoneUnits.find((z) => z.id === u.id) ?? u;
+                                  setActivePopup(null);
+                                  onDeleteZoneUnit(latest);
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-1 bg-red-700 text-white font-semibold rounded hover:bg-red-800 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                Eliminar
                               </button>
                             )}
                         </div>
@@ -2311,118 +2532,135 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           </div>
         )}
 
-        {/* Compact Map Legend Overlay */}
-        <div className="absolute bottom-3 left-3 bg-[#0B1117]/92 backdrop-blur-sm border border-slate-700/80 rounded-md px-3 py-2 text-[11px] text-slate-300 space-y-1.5 pointer-events-auto max-w-[92%]">
-          <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
-              Terrestre
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-sky-500 inline-block" />
-              Lacustre
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-orange-500 inline-block" />
-              Desvío (&gt;{patrolRadiusKm} km)
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block" />
-              Usuario GPS
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-teal-500 inline-block" />
-              Cuadrantes / Patrullaje
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-fuchsia-400 inline-block" />
-              Manifestación / Cierre
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block" />
-              Seguridad Vial
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block" />
-              Homicidio / Grave
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block" />
-              Novedad Rural
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-lime-400 inline-block" />
-              Ambiental
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-red-600 inline-block" />
-              SOS
-            </span>
+        {/* Toggleable Compact Map Legend Overlay */}
+        {showLegend && (
+          <div className="absolute bottom-3 left-3 bg-[#0B1117]/94 backdrop-blur-sm border border-slate-700/80 rounded-md px-3 py-2 text-[11px] text-slate-300 space-y-1.5 pointer-events-auto max-w-[92%] shadow-xl">
+            <div className="flex items-center justify-between gap-3 pb-1 border-b border-slate-800">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                Leyenda del Mapa
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowLegend(false)}
+                className="p-0.5 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Ocultar leyenda"
+                aria-label="Ocultar leyenda"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
+                Terrestre
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-sky-500 inline-block" />
+                Lacustre
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-orange-500 inline-block" />
+                Desvío (&gt;{patrolRadiusKm} km)
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block" />
+                Usuario GPS
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-teal-500 inline-block" />
+                Cuadrantes / Patrullaje
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-fuchsia-400 inline-block" />
+                Manifestación / Cierre
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block" />
+                Seguridad Vial
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block" />
+                Homicidio / Grave
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block" />
+                Novedad Rural
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-lime-400 inline-block" />
+                Ambiental
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-red-600 inline-block" />
+                SOS
+              </span>
+            </div>
+            {layers.boundaries && (
+              <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
+                <span className="text-indigo-300 font-semibold">Límites Territoriales:</span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-3 h-2 rounded-xs inline-block border-2 border-slate-100 bg-sky-500/20" />
+                  Estado Trujillo
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-3 h-2 rounded-xs inline-block border border-indigo-400 bg-indigo-500/35" />
+                  20 Municipios (color transparente · toca un municipio para ver detalle)
+                </span>
+              </div>
+            )}
+            {layers.zoneUnits && (
+              <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
+                <span className="text-slate-400 font-semibold">Unidades CZ-23:</span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-sm inline-block bg-[#7A142B] border border-amber-300" />
+                  HQ CZGNB-23
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-sm inline-block bg-emerald-700 border border-emerald-300" />
+                  D-231
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-sm inline-block bg-sky-700 border border-sky-300" />
+                  DCR 23-1
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-sm inline-block bg-amber-600 border border-amber-200" />
+                  DESUR-23
+                </span>
+              </div>
+            )}
+            {layers.friendlyForces && (
+              <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
+                <span className="text-slate-400 font-semibold">F. Amigas:</span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.GNB.dot}`} />
+                  GNB
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.PNB.dot}`} />
+                  PNB
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.POLICIA_ESTADAL.dot}`} />
+                  Estadal
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.POLICIA_MUNICIPAL.dot}`} />
+                  Municipal
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.CONAS.dot}`} />
+                  CONAS
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.CICPC.dot}`} />
+                  CICPC
+                </span>
+              </div>
+            )}
           </div>
-          {layers.boundaries && (
-            <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
-              <span className="text-indigo-300 font-semibold">Límites Territoriales:</span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-3 h-2 rounded-xs inline-block border-2 border-slate-100 bg-sky-500/20" />
-                Estado Trujillo
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-3 h-2 rounded-xs inline-block border border-indigo-400 bg-indigo-500/35" />
-                20 Municipios (color transparente · toca un municipio para ver detalle)
-              </span>
-            </div>
-          )}
-          {layers.zoneUnits && (
-            <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
-              <span className="text-slate-400 font-semibold">Unidades CZ-23:</span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-sm inline-block bg-[#7A142B] border border-amber-300" />
-                HQ CZGNB-23
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-sm inline-block bg-emerald-700 border border-emerald-300" />
-                D-231
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-sm inline-block bg-sky-700 border border-sky-300" />
-                DCR 23-1
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-sm inline-block bg-amber-600 border border-amber-200" />
-                DESUR-23
-              </span>
-            </div>
-          )}
-          {layers.friendlyForces && (
-            <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-300">
-              <span className="text-slate-400 font-semibold">F. Amigas:</span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.GNB.dot}`} />
-                GNB
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.PNB.dot}`} />
-                PNB
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.POLICIA_ESTADAL.dot}`} />
-                Estadal
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.POLICIA_MUNICIPAL.dot}`} />
-                Municipal
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.CONAS.dot}`} />
-                CONAS
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className={`w-2.5 h-2.5 rounded-sm inline-block ${AGENCY_STYLES.CICPC.dot}`} />
-                CICPC
-              </span>
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Fullscreen Geotagged Photo Lightbox */}

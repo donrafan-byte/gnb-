@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Building2,
+  Crosshair,
   Edit3,
   MapPin,
   Navigation,
@@ -24,9 +25,16 @@ import {
   type DestacamentoId,
   type Incident,
   type ZoneUnit,
+  type ZoneUnitLevel,
   type ZoneUnitStatus,
 } from '../types/operations';
 import { formatCoords, sanitizePhoneForTel } from '../lib/geo';
+
+export interface AddZoneUnitPreset {
+  destacamento?: DestacamentoId;
+  nivel?: ZoneUnitLevel;
+  compania?: string;
+}
 
 interface ZoneUnitsViewProps {
   zoneUnits: ZoneUnit[];
@@ -35,14 +43,16 @@ interface ZoneUnitsViewProps {
   currentUserUid: string;
   canOperate: boolean;
   canModerate: boolean;
+  isCommandAdmin: boolean;
   selectedDestacamento: DestacamentoId | 'ALL';
   onSelectDestacamento: (dest: DestacamentoId | 'ALL') => void;
   onLocateUnitOnMap: (unit: ZoneUnit) => void;
+  onRelocateUnitOnMap: (unit: ZoneUnit) => void;
   onDeployCommissionFromUnit: (unit: ZoneUnit) => void;
-  onAddZoneUnit: (defaultDest?: DestacamentoId) => void;
+  onAddZoneUnit: (preset?: AddZoneUnitPreset) => void;
   onEditZoneUnit: (unit: ZoneUnit) => void;
   onChangeUnitStatus: (unit: ZoneUnit, nextStatus: ZoneUnitStatus) => Promise<void>;
-  onDeleteZoneUnit: (unit: ZoneUnit) => Promise<void>;
+  onDeleteZoneUnit: (unit: ZoneUnit) => void;
 }
 
 const STATUS_BADGE: Record<ZoneUnitStatus, string> = {
@@ -59,9 +69,11 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
   currentUserUid,
   canOperate,
   canModerate,
+  isCommandAdmin,
   selectedDestacamento,
   onSelectDestacamento,
   onLocateUnitOnMap,
+  onRelocateUnitOnMap,
   onDeployCommissionFromUnit,
   onAddZoneUnit,
   onEditZoneUnit,
@@ -251,6 +263,11 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
   const canEditUnit = (u: ZoneUnit) =>
     canOperate && (canModerate || u.ownerId === currentUserUid);
 
+  const canDeleteUnit = (u: ZoneUnit) =>
+    !u.id.startsWith('cz23_ref_') &&
+    u.nivel !== 'comando_zona' &&
+    (isCommandAdmin || (canModerate && u.ownerId === currentUserUid));
+
   return (
     <div className="h-full overflow-y-auto bg-[#0B1117] p-4 sm:p-5 space-y-5">
       {/* CZGNB-23 Command HQ Banner */}
@@ -305,16 +322,36 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
               </button>
             )}
             {canOperate && (
-              <button
-                type="button"
-                onClick={() =>
-                  onAddZoneUnit(selectedDestacamento === 'ALL' ? 'D-231' : selectedDestacamento)
-                }
-                className="px-3.5 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded flex items-center gap-1.5 cursor-pointer shadow"
-              >
-                <Plus className="w-4 h-4" />
-                Agregar Puesto / Compañía
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onAddZoneUnit({
+                      destacamento:
+                        selectedDestacamento === 'ALL' ? 'D-231' : selectedDestacamento,
+                      nivel: 'compania',
+                    })
+                  }
+                  className="px-3 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded flex items-center gap-1.5 cursor-pointer shadow"
+                >
+                  <Plus className="w-4 h-4" />
+                  Nueva Compañía
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onAddZoneUnit({
+                      destacamento:
+                        selectedDestacamento === 'ALL' ? 'D-231' : selectedDestacamento,
+                      nivel: 'puesto_pac',
+                    })
+                  }
+                  className="px-3 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded flex items-center gap-1.5 cursor-pointer shadow"
+                >
+                  <Plus className="w-4 h-4" />
+                  Nuevo Puesto / PAC
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -546,14 +583,28 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
                   </div>
                 </div>
                 {canOperate && (
-                  <button
-                    type="button"
-                    onClick={() => onAddZoneUnit(group.destId)}
-                    className="px-2.5 py-1 text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-600 rounded flex items-center gap-1 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Añadir en {group.meta.shortLabel}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onAddZoneUnit({ destacamento: group.destId, nivel: 'compania' })
+                      }
+                      className="px-2.5 py-1 text-[11px] font-bold bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-600/60 rounded flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Nueva Compañía
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onAddZoneUnit({ destacamento: group.destId, nivel: 'puesto_pac' })
+                      }
+                      className="px-2.5 py-1 text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-600 rounded flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Nuevo Puesto
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -611,14 +662,35 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
                         Mapa
                       </button>
                       {canEditUnit(hq) && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onRelocateUnitOnMap(hq)}
+                            className="px-2.5 py-1.5 text-[11px] font-semibold bg-sky-950/80 hover:bg-sky-900 text-sky-200 border border-sky-700/60 rounded inline-flex items-center gap-1 cursor-pointer"
+                            title="Reubicar sede tocando en el mapa"
+                          >
+                            <Crosshair className="w-3 h-3" />
+                            Reubicar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onEditZoneUnit(hq)}
+                            className="px-2 py-1.5 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
+                            title="Editar sede"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            Editar
+                          </button>
+                        </>
+                      )}
+                      {canDeleteUnit(hq) && (
                         <button
                           type="button"
-                          onClick={() => onEditZoneUnit(hq)}
-                          className="px-2 py-1.5 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
-                          title="Editar sede"
+                          onClick={() => onDeleteZoneUnit(hq)}
+                          className="px-2 py-1.5 text-[11px] font-semibold bg-slate-800 hover:bg-red-900/80 text-slate-400 hover:text-red-200 rounded inline-flex items-center gap-1 cursor-pointer"
+                          title="Eliminar unidad"
                         >
-                          <Edit3 className="w-3 h-3" />
-                          Editar
+                          <Trash2 className="w-3 h-3" />
                         </button>
                       )}
                     </div>
@@ -662,28 +734,70 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
                         )}
                       </div>
 
-                      {cg.compDoc && (
-                        <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        {canOperate && (
                           <button
                             type="button"
-                            onClick={() => onLocateUnitOnMap(cg.compDoc!)}
-                            className="px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded inline-flex items-center gap-1 cursor-pointer"
+                            onClick={() =>
+                              onAddZoneUnit({
+                                destacamento: group.destId,
+                                nivel: 'puesto_pac',
+                                compania: cg.compDoc?.compania || cg.compName,
+                              })
+                            }
+                            className="px-2 py-1 text-[11px] font-bold bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded inline-flex items-center gap-1 cursor-pointer"
+                            title="Crear nuevo puesto/PAC bajo esta compañía"
                           >
-                            <MapPin className="w-3 h-3 text-emerald-400" />
-                            Mapa
+                            <Plus className="w-3 h-3" />
+                            Puesto
                           </button>
-                          {canEditUnit(cg.compDoc) && (
+                        )}
+                        {cg.compDoc && (
+                          <>
                             <button
                               type="button"
-                              onClick={() => onEditZoneUnit(cg.compDoc!)}
-                              className="px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
+                              onClick={() => onLocateUnitOnMap(cg.compDoc!)}
+                              className="px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded inline-flex items-center gap-1 cursor-pointer"
                             >
-                              <Edit3 className="w-3 h-3" />
-                              Editar
+                              <MapPin className="w-3 h-3 text-emerald-400" />
+                              Mapa
                             </button>
-                          )}
-                        </div>
-                      )}
+                            {canEditUnit(cg.compDoc) && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => onRelocateUnitOnMap(cg.compDoc!)}
+                                  className="px-2 py-1 text-[11px] font-semibold bg-sky-950/80 hover:bg-sky-900 text-sky-200 border border-sky-700/60 rounded inline-flex items-center gap-1 cursor-pointer"
+                                  title="Reubicar esta compañía en el mapa"
+                                >
+                                  <Crosshair className="w-3 h-3" />
+                                  Reubicar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onEditZoneUnit(cg.compDoc!)}
+                                  className="px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
+                                  title="Editar compañía"
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                  Editar
+                                </button>
+                              </>
+                            )}
+                            {canDeleteUnit(cg.compDoc) && (
+                              <button
+                                type="button"
+                                onClick={() => onDeleteZoneUnit(cg.compDoc!)}
+                                className="px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-red-900/80 text-slate-400 hover:text-red-200 rounded inline-flex items-center gap-1 cursor-pointer"
+                                title="Eliminar compañía"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                Eliminar
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {/* Puestos / PACs Grid */}
@@ -695,7 +809,7 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
                       <div className="p-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
                         {cg.puestos.map((p) => {
                           const canEdit = canEditUnit(p);
-                          const canDelete = canModerate && (canModerate || p.ownerId === currentUserUid);
+                          const canDelete = canDeleteUnit(p);
                           return (
                             <div
                               key={p.id}
@@ -790,14 +904,25 @@ export const ZoneUnitsView: React.FC<ZoneUnitsViewProps> = ({
                                   </a>
                                 )}
                                 {canEdit && (
-                                  <button
-                                    type="button"
-                                    onClick={() => onEditZoneUnit(p)}
-                                    className="px-2 py-1 text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer ml-auto"
-                                    title="Editar puesto"
-                                  >
-                                    <Edit3 className="w-3 h-3" />
-                                  </button>
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => onRelocateUnitOnMap(p)}
+                                      className="px-2 py-1 text-[10px] font-bold bg-sky-950/80 hover:bg-sky-900 text-sky-200 border border-sky-700/50 rounded inline-flex items-center gap-1 cursor-pointer ml-auto"
+                                      title="Reubicar puesto tocando en el mapa"
+                                    >
+                                      <Crosshair className="w-3 h-3" />
+                                      Reubicar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => onEditZoneUnit(p)}
+                                      className="px-2 py-1 text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
+                                      title="Editar puesto"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                    </button>
+                                  </>
                                 )}
                                 {canDelete && (
                                   <button

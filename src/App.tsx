@@ -278,6 +278,14 @@ export default function App() {
   } | null>(null);
 
   const [mapMode, setMapMode] = useState<TacticalMapMode>('inspect');
+  const [showLeftPanel, setShowLeftPanel] = useState(true);
+  const [showRightPanel, setShowRightPanel] = useState(true);
+  const mapColSpanClass =
+    showLeftPanel && showRightPanel
+      ? 'lg:col-span-6 xl:col-span-6'
+      : showLeftPanel || showRightPanel
+        ? 'lg:col-span-9 xl:col-span-9'
+        : 'lg:col-span-12 xl:col-span-12';
   const [patrolRadiusKm, setPatrolRadiusKm] = useState<number>(() => {
     try {
       const saved = Number(window.localStorage.getItem('dcr231_patrol_radius_km'));
@@ -310,7 +318,13 @@ export default function App() {
     open: boolean;
     editing: ZoneUnit | null;
     defaultDestacamento: DestacamentoId;
+    defaultNivel?: ZoneUnit['nivel'];
+    defaultCompania?: string;
+    defaultCoords?: { lat: number; lng: number } | null;
   }>({ open: false, editing: null, defaultDestacamento: 'D-231' });
+  const [relocatingUnit, setRelocatingUnit] = useState<ZoneUnit | null>(null);
+  const [deleteUnitCandidate, setDeleteUnitCandidate] = useState<ZoneUnit | null>(null);
+  const [deletingUnitBusy, setDeletingUnitBusy] = useState(false);
   const [incidentModal, setIncidentModal] = useState<{
     open: boolean;
     coords: { lat: number; lng: number };
@@ -2637,9 +2651,78 @@ export default function App() {
         resumen: `Eliminó unidad orgánica ${unit.codigo} (${unit.nombre}) de ${DESTACAMENTO_META[unit.destacamento].shortLabel}.`,
         severidad: 'alerta_mal_uso',
       });
+      if (relocatingUnit?.id === unit.id) {
+        setRelocatingUnit(null);
+        setMapMode('inspect');
+      }
       showNotice(`Unidad ${unit.codigo} eliminada del despliegue orgánico.`);
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, `zoneUnits/${unit.id}`);
+    }
+  };
+
+  const handleRequestDeleteZoneUnit = useCallback(
+    (unit: ZoneUnit) => {
+      if (!user || unit.id.startsWith('cz23_ref_') || unit.nivel === 'comando_zona') return;
+      if (!isCommandAdmin && !(canEditCatalogs && unit.ownerId === user.uid)) {
+        showNotice('Solo el Administrador o el creador (Supervisor) puede eliminar esta unidad.');
+        return;
+      }
+      setDeleteUnitCandidate(unit);
+    },
+    [user, isCommandAdmin, canEditCatalogs, showNotice]
+  );
+
+  const handleStartRelocateZoneUnit = useCallback(
+    (unit: ZoneUnit) => {
+      if (!user || !canOperateField) return;
+      if (unit.id.startsWith('cz23_ref_')) {
+        showNotice('Sincronizando estructura inicial del CZGNB-23, intenta en unos segundos.');
+        return;
+      }
+      if (!canEditCatalogs && unit.ownerId !== user.uid) {
+        showNotice('Solo el creador o un Supervisor/Administrador puede reubicar esta unidad.');
+        return;
+      }
+      setLayers((prev) => ({ ...prev, zoneUnits: true }));
+      setRelocatingUnit(unit);
+      setActiveTab('mapa');
+      setMobileMapPane('mapa');
+      setMapMode('relocate_unit');
+      setFocusTarget({ lat: unit.lat, lng: unit.lng, zoom: 13, seq: Date.now() });
+      showNotice(`Toca en el mapa la nueva ubicación para ${unit.codigo} (${unit.nombre}).`);
+    },
+    [user, canOperateField, canEditCatalogs, showNotice]
+  );
+
+  const handleRelocateZoneUnitCoords = async (coords: { lat: number; lng: number }) => {
+    if (!user || !canOperateField || !relocatingUnit) return;
+    const target = zoneUnits.find((u) => u.id === relocatingUnit.id) ?? relocatingUnit;
+    if (target.id.startsWith('cz23_ref_')) return;
+    if (!canEditCatalogs && target.ownerId !== user.uid) {
+      setRelocatingUnit(null);
+      setMapMode('inspect');
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'zoneUnits', target.id), {
+        lat: coords.lat,
+        lng: coords.lng,
+        updatedAt: serverTimestamp(),
+      });
+      void writeAuditLog({
+        accion: 'editar',
+        entidad: 'zoneUnit',
+        entidadId: target.id,
+        resumen: `Reubicó en mapa ${target.codigo} (${target.nombre}) a ${formatCoords(coords.lat, coords.lng)}.`,
+        severidad: 'normal',
+      });
+      setRelocatingUnit(null);
+      setMapMode('inspect');
+      setFocusTarget({ lat: coords.lat, lng: coords.lng, zoom: 14, seq: Date.now() });
+      showNotice(`${target.codigo} (${target.nombre}) reubicada y actualizada para todo el CZGNB-23.`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `zoneUnits/${target.id}`);
     }
   };
 
@@ -2976,7 +3059,9 @@ export default function App() {
               <aside
                 className={`${
                   mobileMapPane === 'lista' ? 'flex' : 'hidden'
-                } lg:flex lg:col-span-3 xl:col-span-3 h-full bg-[#111822] border-r border-slate-800 flex-col overflow-hidden`}
+                } ${
+                  showLeftPanel ? 'lg:flex lg:col-span-3 xl:col-span-3' : 'lg:hidden'
+                } h-full bg-[#111822] border-r border-slate-800 flex-col overflow-hidden`}
               >
               <div className="p-3.5 border-b border-slate-800 space-y-2.5 shrink-0">
                 <div className="flex items-center justify-between">
@@ -3391,7 +3476,7 @@ export default function App() {
             <section
               className={`${
                 mobileMapPane === 'mapa' ? 'block' : 'hidden'
-              } lg:block lg:col-span-6 xl:col-span-6 h-full min-h-[380px]`}
+              } lg:block ${mapColSpanClass} h-full min-h-[380px]`}
             >
               <TacticalMap
                 commissions={filteredMapCommissions}
@@ -3420,6 +3505,9 @@ export default function App() {
                 }}
                 onMapModeChange={(nextMode) => {
                   if (!canOperateField && nextMode !== 'inspect') return;
+                  if (nextMode !== 'relocate_unit') {
+                    setRelocatingUnit(null);
+                  }
                   setMapMode(nextMode);
                 }}
                 onToggleMyLiveGps={() => void handleToggleMyLiveGps()}
@@ -3448,6 +3536,22 @@ export default function App() {
                   });
                 }}
                 onMapClickForRelocate={(coords) => void handleRelocateCommission(coords)}
+                relocatingUnit={relocatingUnit}
+                onMapClickForRelocateUnit={(coords) =>
+                  void handleRelocateZoneUnitCoords(coords)
+                }
+                onMapClickForCreateUnit={(coords) => {
+                  if (!canOperateField) return;
+                  setMapMode('inspect');
+                  setZoneUnitModal({
+                    open: true,
+                    editing: null,
+                    defaultDestacamento:
+                      selectedDestacamento === 'ALL' ? 'D-231' : selectedDestacamento,
+                    defaultNivel: 'puesto_pac',
+                    defaultCoords: coords,
+                  });
+                }}
                 onEditGangZone={
                   canOperateField
                     ? (zone) => setGangModal({ open: true, editing: zone })
@@ -3468,9 +3572,24 @@ export default function App() {
                         })
                     : undefined
                 }
+                onStartRelocateZoneUnit={
+                  canOperateField ? handleStartRelocateZoneUnit : undefined
+                }
+                onDeleteZoneUnit={
+                  canEditCatalogs ? handleRequestDeleteZoneUnit : undefined
+                }
                 onDeployCommissionAtUnit={
                   canOperateField ? handleDeployCommissionFromUnit : undefined
                 }
+                showLeftPanel={showLeftPanel}
+                showRightPanel={showRightPanel}
+                onToggleLeftPanel={() => setShowLeftPanel((v) => !v)}
+                onToggleRightPanel={() => setShowRightPanel((v) => !v)}
+                onToggleWideMap={() => {
+                  const shouldExpand = showLeftPanel || showRightPanel;
+                  setShowLeftPanel(!shouldExpand);
+                  setShowRightPanel(!shouldExpand);
+                }}
               />
             </section>
 
@@ -3478,7 +3597,9 @@ export default function App() {
             <div
               className={`${
                 mobileMapPane === 'detalle' ? 'block' : 'hidden'
-              } lg:block lg:col-span-3 xl:col-span-3 h-full overflow-hidden`}
+              } ${
+                showRightPanel ? 'lg:block lg:col-span-3 xl:col-span-3' : 'lg:hidden'
+              } h-full overflow-hidden`}
             >
               <CommissionDetailDrawer
                 commission={selectedCommission}
@@ -3526,17 +3647,22 @@ export default function App() {
                 currentUserUid={user.uid}
                 canOperate={canOperateField}
                 canModerate={canEditCatalogs}
+                isCommandAdmin={isCommandAdmin}
                 selectedDestacamento={selectedDestacamento}
                 onSelectDestacamento={setSelectedDestacamento}
                 onLocateUnitOnMap={handleLocateZoneUnitOnMap}
+                onRelocateUnitOnMap={handleStartRelocateZoneUnit}
                 onDeployCommissionFromUnit={handleDeployCommissionFromUnit}
-                onAddZoneUnit={(defaultDest) =>
+                onAddZoneUnit={(preset) =>
                   setZoneUnitModal({
                     open: true,
                     editing: null,
                     defaultDestacamento:
-                      defaultDest ??
+                      preset?.destacamento ??
                       (selectedDestacamento === 'ALL' ? 'D-231' : selectedDestacamento),
+                    defaultNivel: preset?.nivel ?? 'puesto_pac',
+                    defaultCompania: preset?.compania,
+                    defaultCoords: null,
                   })
                 }
                 onEditZoneUnit={(unit) =>
@@ -3547,7 +3673,7 @@ export default function App() {
                   })
                 }
                 onChangeUnitStatus={handleChangeZoneUnitStatus}
-                onDeleteZoneUnit={handleDeleteZoneUnit}
+                onDeleteZoneUnit={handleRequestDeleteZoneUnit}
               />
             )}
 
@@ -3746,17 +3872,106 @@ export default function App() {
           open={zoneUnitModal.open}
           existingUnit={zoneUnitModal.editing}
           defaultDestacamento={zoneUnitModal.defaultDestacamento}
+          defaultNivel={zoneUnitModal.defaultNivel}
+          defaultCompania={zoneUnitModal.defaultCompania}
+          defaultCoords={zoneUnitModal.defaultCoords}
+          canDelete={Boolean(
+            zoneUnitModal.editing &&
+              !zoneUnitModal.editing.id.startsWith('cz23_ref_') &&
+              zoneUnitModal.editing.nivel !== 'comando_zona' &&
+              (isCommandAdmin ||
+                (canEditCatalogs && zoneUnitModal.editing.ownerId === user.uid))
+          )}
           allUnits={effectiveZoneUnits}
           onClose={() =>
             setZoneUnitModal({
               open: false,
               editing: null,
               defaultDestacamento: 'D-231',
+              defaultNivel: 'puesto_pac',
+              defaultCompania: undefined,
+              defaultCoords: null,
             })
           }
+          onStartRelocateOnMap={handleStartRelocateZoneUnit}
+          onRequestDelete={handleRequestDeleteZoneUnit}
           onSubmit={handleSaveZoneUnit}
         />
       )}
+
+      {/* Safe In-App Confirmation Modal for Deleting Compañía / Puesto / PAC */}
+      {deleteUnitCandidate && (() => {
+        const linkedPuestosCount =
+          deleteUnitCandidate.nivel === 'compania'
+            ? effectiveZoneUnits.filter(
+                (u) =>
+                  u.nivel === 'puesto_pac' &&
+                  u.destacamento === deleteUnitCandidate.destacamento &&
+                  (u.compania === deleteUnitCandidate.compania ||
+                    u.compania === deleteUnitCandidate.nombre)
+              ).length
+            : 0;
+        return (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="w-full max-w-md bg-[#111822] border border-red-500/50 rounded-lg shadow-2xl overflow-hidden">
+              <div className="px-4 py-3 bg-red-950/70 border-b border-red-500/40 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                <h3 className="text-sm font-bold text-white uppercase tracking-wide">
+                  Confirmar Eliminación de Unidad
+                </h3>
+              </div>
+              <div className="p-4 space-y-3 text-xs text-slate-200">
+                <p>
+                  ¿Confirmas eliminar{' '}
+                  <strong className="text-white">
+                    {deleteUnitCandidate.codigo} — {deleteUnitCandidate.nombre}
+                  </strong>{' '}
+                  ({ZONE_UNIT_LEVEL_LABELS[deleteUnitCandidate.nivel]} ·{' '}
+                  {DESTACAMENTO_META[deleteUnitCandidate.destacamento].shortLabel}) del
+                  despliegue orgánico del CZGNB-23?
+                </p>
+                {linkedPuestosCount > 0 && (
+                  <div className="p-2.5 bg-amber-950/60 border border-amber-500/50 rounded text-amber-200 text-[11px]">
+                    Esta compañía tiene <strong>{linkedPuestosCount}</strong> puesto(s)/PAC(s)
+                    adscritos. Los puestos no se borrarán automáticamente y seguirán visibles
+                    para ser reasignados o eliminados por separado.
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-400">
+                  Esta acción se sincroniza de inmediato para todos los usuarios autorizados y
+                  queda registrada en la auditoría.
+                </p>
+              </div>
+              <div className="px-4 py-3 bg-[#0E151E] border-t border-slate-800 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={deletingUnitBusy}
+                  onClick={() => setDeleteUnitCandidate(null)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 rounded cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingUnitBusy}
+                  onClick={async () => {
+                    setDeletingUnitBusy(true);
+                    try {
+                      await handleDeleteZoneUnit(deleteUnitCandidate);
+                      setDeleteUnitCandidate(null);
+                    } finally {
+                      setDeletingUnitBusy(false);
+                    }
+                  }}
+                  className="px-4 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded cursor-pointer"
+                >
+                  {deletingUnitBusy ? 'Eliminando...' : 'Eliminar Definitivamente'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {canOperateField && incidentModal?.open && (
         <IncidentFormModal

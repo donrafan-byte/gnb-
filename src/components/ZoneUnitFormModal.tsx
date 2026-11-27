@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Crosshair, Shield, X } from 'lucide-react';
+import { Crosshair, MapPin, Shield, Trash2, X } from 'lucide-react';
 import {
   DESTACAMENTO_META,
   PHONE_REGEX,
@@ -38,8 +38,14 @@ interface ZoneUnitFormModalProps {
   open: boolean;
   existingUnit?: ZoneUnit | null;
   defaultDestacamento?: DestacamentoId;
+  defaultNivel?: ZoneUnitLevel;
+  defaultCompania?: string;
+  defaultCoords?: { lat: number; lng: number } | null;
+  canDelete?: boolean;
   allUnits: ZoneUnit[];
   onClose: () => void;
+  onStartRelocateOnMap?: (unit: ZoneUnit) => void;
+  onRequestDelete?: (unit: ZoneUnit) => void;
   onSubmit: (values: ZoneUnitFormValues, editingId?: string) => Promise<void>;
 }
 
@@ -47,8 +53,14 @@ export const ZoneUnitFormModal: React.FC<ZoneUnitFormModalProps> = ({
   open,
   existingUnit,
   defaultDestacamento = 'D-231',
+  defaultNivel = 'puesto_pac',
+  defaultCompania,
+  defaultCoords,
+  canDelete = false,
   allUnits,
   onClose,
+  onStartRelocateOnMap,
+  onRequestDelete,
   onSubmit,
 }) => {
   const [codigo, setCodigo] = useState('');
@@ -98,11 +110,23 @@ export const ZoneUnitFormModal: React.FC<ZoneUnitFormModalProps> = ({
     } else {
       const meta = DESTACAMENTO_META[defaultDestacamento];
       const comps = getCompaniasForDestacamento(allUnits, defaultDestacamento);
-      setCodigo(`${meta.prefijoComision}-PTO-`);
+      const levelPrefix =
+        defaultNivel === 'compania'
+          ? 'CIA'
+          : defaultNivel === 'destacamento'
+            ? 'DEST'
+            : 'PAC';
+      setCodigo(`${meta.prefijoComision}-${levelPrefix}-`);
       setNombre('');
-      setNivel('puesto_pac');
+      setNivel(defaultNivel);
       setDestacamento(defaultDestacamento);
-      setCompania(comps[0] || '');
+      setCompania(
+        defaultCompania !== undefined
+          ? defaultCompania
+          : defaultNivel === 'compania'
+            ? ''
+            : comps[0] || ''
+      );
       setMunicipio(meta.municipioSede);
       setSector('');
       setModalidad('terrestre');
@@ -115,13 +139,13 @@ export const ZoneUnitFormModal: React.FC<ZoneUnitFormModalProps> = ({
             ? 'VHF 154.825 MHz'
             : 'VHF 154.650 MHz'
       );
-      setEfectivosGuardia('10');
+      setEfectivosGuardia(defaultNivel === 'compania' ? '28' : '10');
       setEstadoOperativo('operativo');
-      setLat(meta.lat.toFixed(5));
-      setLng(meta.lng.toFixed(5));
+      setLat((defaultCoords?.lat ?? meta.lat).toFixed(6));
+      setLng((defaultCoords?.lng ?? meta.lng).toFixed(6));
       setNotas('');
     }
-  }, [open, existingUnit, defaultDestacamento, allUnits]);
+  }, [open, existingUnit, defaultDestacamento, defaultNivel, defaultCompania, defaultCoords, allUnits]);
 
   if (!open) return null;
 
@@ -187,13 +211,17 @@ export const ZoneUnitFormModal: React.FC<ZoneUnitFormModalProps> = ({
 
     setSaving(true);
     try {
+      const normalizedCompania =
+        nivel === 'compania' && !compania.trim()
+          ? nombre.trim()
+          : compania.trim();
       await onSubmit(
         {
           codigo: codigo.trim().toUpperCase().slice(0, 32),
           nombre: nombre.trim().slice(0, 120),
           nivel,
           destacamento,
-          compania: compania.trim().slice(0, 100),
+          compania: normalizedCompania.slice(0, 100),
           municipio: municipio.trim().slice(0, 80),
           sector: sector.trim().slice(0, 100),
           modalidad,
@@ -518,25 +546,57 @@ export const ZoneUnitFormModal: React.FC<ZoneUnitFormModalProps> = ({
             />
           </div>
 
-          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 rounded cursor-pointer"
-            >
-              Cancelar
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded cursor-pointer"
-            >
-              {saving
-                ? 'Guardando...'
-                : existingUnit
-                  ? 'Guardar Cambios'
-                  : 'Registrar Unidad en CZ-23'}
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
+            <div className="flex items-center gap-1.5">
+              {existingUnit && onStartRelocateOnMap && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onStartRelocateOnMap(existingUnit);
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-sky-200 hover:text-white bg-sky-900/70 hover:bg-sky-800 border border-sky-600/60 rounded inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MapPin className="w-3.5 h-3.5" />
+                  Reubicar en Mapa
+                </button>
+              )}
+              {existingUnit && canDelete && onRequestDelete && existingUnit.nivel !== 'comando_zona' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onRequestDelete(existingUnit);
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-red-200 hover:text-white bg-red-950/70 hover:bg-red-800 border border-red-600/60 rounded inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Eliminar
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 ml-auto">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded cursor-pointer"
+              >
+                {saving
+                  ? 'Guardando...'
+                  : existingUnit
+                    ? 'Guardar Cambios'
+                    : nivel === 'compania'
+                      ? 'Crear Compañía'
+                      : 'Crear Puesto / PAC'}
+              </button>
+            </div>
           </div>
         </form>
       </div>

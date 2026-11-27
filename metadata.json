@@ -1,0 +1,6 @@
+{
+  "name": "DCR 23-1 La Ceiba — Control de Comisiones",
+  "description": "Sistema de comando, control y rastreo en tiempo real de comisiones militares y policiales (terrestres y lacustres) del Destacamento Comando Rural 23-1 La Ceiba en el Estado Trujillo, Venezuela.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

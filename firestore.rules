@@ -1,0 +1,1061 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Primitive Helpers (Zero-Trust + Privilege RBAC — CZGNB-23 Trujillo)
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCodeHash(hash) {
+      return hash is string && hash.size() == 64 && hash.matches('^[a-f0-9]{64}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'donrafan@gmail.com';
+    }
+
+    function isOfficerDocAuthorized() {
+      return isVerified()
+        && exists(/databases/$(database)/documents/officers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/officers/$(request.auth.uid)).data.accessStatus == 'autorizado';
+    }
+
+    function isDelegatedAdmin() {
+      return isOfficerDocAuthorized()
+        && 'privilegio' in get(/databases/$(database)/documents/officers/$(request.auth.uid)).data
+        && get(/databases/$(database)/documents/officers/$(request.auth.uid)).data.privilegio == 'administrador';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || isDelegatedAdmin() || (
+        isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Master Access Gate: Command Admin or explicitly authorized CZGNB-23 officers
+    // Optimized to avoid duplicate officer doc lookups on shared collection list queries
+    function isAuthorizedOfficer() {
+      return isBootstrappedAdmin() || isOfficerDocAuthorized() || (
+        isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Field Operations Gate: consulta (read-only) users are strictly blocked from mutating field data
+    function canOperateField() {
+      return isAdmin() || (
+        isOfficerDocAuthorized()
+        && (
+          !('privilegio' in get(/databases/$(database)/documents/officers/$(request.auth.uid)).data)
+          || get(/databases/$(database)/documents/officers/$(request.auth.uid)).data.privilegio in ['operador', 'supervisor', 'administrador']
+        )
+      );
+    }
+
+    // Structural Catalog & Deletion Gate: only supervisor or admin can moderate catalogs or delete records
+    function canEditCatalogs() {
+      return isAdmin() || (
+        isOfficerDocAuthorized()
+        && 'privilegio' in get(/databases/$(database)/documents/officers/$(request.auth.uid)).data
+        && get(/databases/$(database)/documents/officers/$(request.auth.uid)).data.privilegio in ['supervisor', 'administrador']
+      );
+    }
+
+    function isOwner(ownerId) {
+      return isVerified() && request.auth.uid == ownerId;
+    }
+
+    function isValidPhone(phone) {
+      return phone is string && phone.size() >= 7 && phone.size() <= 24 && phone.matches('^\\+?[0-9\\-\\s]{7,20}$');
+    }
+
+    function isValidDestacamento(dest) {
+      return dest in ['CZGNB-23', 'D-231', 'DCR-23-1', 'DESUR-23'];
+    }
+
+    function isValidTrujilloCoords(lat, lng) {
+      return lat is number && lng is number && lat >= 8.5 && lat <= 10.5 && lng >= -72.0 && lng <= -69.5;
+    }
+
+    function isValidGeoCoords(lat, lng) {
+      return lat is number && lng is number && lat >= -90.0 && lat <= 90.0 && lng >= -180.0 && lng <= 180.0;
+    }
+
+    function isValidGeoPhoto(photo) {
+      return photo is string
+        && photo.size() <= 260000
+        && (
+          photo == ''
+          || (photo.size() >= 24 && photo[0:23] == 'data:image/jpeg;base64,')
+          || (photo.size() >= 23 && photo[0:22] == 'data:image/png;base64,')
+          || (photo.size() >= 24 && photo[0:23] == 'data:image/webp;base64,')
+        );
+    }
+
+    function isValidPersonnelEntry(entry) {
+      return entry is map
+        && entry.keys().hasAll(['grado', 'nombre', 'cedula', 'rol'])
+        && entry.keys().hasOnly(['grado', 'nombre', 'cedula', 'rol'])
+        && entry.grado is string && entry.grado.size() >= 1 && entry.grado.size() <= 40
+        && entry.nombre is string && entry.nombre.size() >= 2 && entry.nombre.size() <= 100
+        && entry.cedula is string && entry.cedula.size() >= 4 && entry.cedula.size() <= 24
+        && entry.rol is string && entry.rol.size() >= 2 && entry.rol.size() <= 60;
+    }
+
+    function isValidWeaponEntry(entry) {
+      return entry is map
+        && entry.keys().hasAll(['tipo', 'serial', 'municion', 'asignadoA'])
+        && entry.keys().hasOnly(['tipo', 'serial', 'municion', 'asignadoA'])
+        && entry.tipo is string && entry.tipo.size() >= 2 && entry.tipo.size() <= 80
+        && entry.serial is string && entry.serial.size() >= 2 && entry.serial.size() <= 48
+        && entry.municion is string && entry.municion.size() >= 1 && entry.municion.size() <= 40
+        && entry.asignadoA is string && entry.asignadoA.size() >= 2 && entry.asignadoA.size() <= 100;
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Anti-Update-Gap)
+    // =========================================================================
+    function isValidOfficer(data, officerId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'unit', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'email', 'unit',
+          'destacamento', 'compania', 'puesto',
+          'grado', 'cedula', 'telefono', 'cargo', 'perfilCompleto',
+          'accessStatus', 'privilegio', 'privilegioActualizadoPor', 'privilegioActualizadoAt',
+          'authorizedBy', 'authorizedCodeHash', 'authorizedAt',
+          'expulsadoMotivo', 'expulsadoPor', 'expulsadoAt', 'solicitudNota',
+          'lastLoginAt', 'loginCount', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid) && data.uid == officerId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 150
+        && data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 120
+        && (!('destacamento' in data) || isValidDestacamento(data.destacamento))
+        && (!('compania' in data) || (data.compania is string && data.compania.size() <= 100))
+        && (!('puesto' in data) || (data.puesto is string && data.puesto.size() <= 100))
+        && (!('grado' in data) || (data.grado is string && data.grado.size() <= 40))
+        && (!('cedula' in data) || (data.cedula is string && data.cedula.size() <= 24))
+        && (!('telefono' in data) || (data.telefono is string && (data.telefono == '' || isValidPhone(data.telefono))))
+        && (!('cargo' in data) || (data.cargo is string && data.cargo.size() <= 80))
+        && (!('perfilCompleto' in data) || data.perfilCompleto is bool)
+        && (!('accessStatus' in data) || data.accessStatus in ['pendiente', 'autorizado', 'expulsado'])
+        && (!('privilegio' in data) || data.privilegio in ['consulta', 'operador', 'supervisor', 'administrador'])
+        && (!('privilegioActualizadoPor' in data) || (data.privilegioActualizadoPor is string && data.privilegioActualizadoPor.size() <= 150))
+        && (!('privilegioActualizadoAt' in data) || data.privilegioActualizadoAt is timestamp)
+        && (!('authorizedBy' in data) || (data.authorizedBy is string && data.authorizedBy.size() <= 150))
+        && (!('authorizedCodeHash' in data) || (data.authorizedCodeHash is string && (data.authorizedCodeHash == '' || isValidCodeHash(data.authorizedCodeHash))))
+        && (!('authorizedAt' in data) || data.authorizedAt is timestamp)
+        && (!('expulsadoMotivo' in data) || (data.expulsadoMotivo is string && data.expulsadoMotivo.size() <= 240))
+        && (!('expulsadoPor' in data) || (data.expulsadoPor is string && data.expulsadoPor.size() <= 150))
+        && (!('expulsadoAt' in data) || data.expulsadoAt is timestamp)
+        && (!('solicitudNota' in data) || (data.solicitudNota is string && data.solicitudNota.size() <= 240))
+        && (!('lastLoginAt' in data) || data.lastLoginAt is timestamp)
+        && (!('loginCount' in data) || (data.loginCount is int && data.loginCount >= 1 && data.loginCount <= 1000000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAccessCode(data, codeHash) {
+      return data.keys().hasAll([
+          'codeHash', 'label', 'codeHint', 'active', 'maxUses', 'usedCount',
+          'createdByUid', 'createdByEmail', 'lastUsedByUid', 'lastUsedByEmail',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'codeHash', 'label', 'codeHint', 'active', 'maxUses', 'usedCount',
+          'createdByUid', 'createdByEmail', 'lastUsedByUid', 'lastUsedByEmail',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidCodeHash(data.codeHash) && data.codeHash == codeHash
+        && data.label is string && data.label.size() >= 2 && data.label.size() <= 100
+        && data.codeHint is string && data.codeHint.size() >= 4 && data.codeHint.size() <= 32
+        && data.active is bool
+        && data.maxUses is int && data.maxUses >= 1 && data.maxUses <= 100
+        && data.usedCount is int && data.usedCount >= 0 && data.usedCount <= 100
+        && data.usedCount <= data.maxUses
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string && data.createdByEmail.size() >= 3 && data.createdByEmail.size() <= 150
+        && data.lastUsedByUid is string && data.lastUsedByUid.size() <= 128
+        && data.lastUsedByEmail is string && data.lastUsedByEmail.size() <= 150
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLiveLocation(data, locationId) {
+      return data.keys().hasAll([
+          'uid', 'ownerId', 'displayName', 'commissionId', 'commissionCodigo',
+          'lat', 'lng', 'accuracyMeters', 'speedKmh', 'enComision', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'ownerId', 'displayName', 'commissionId', 'commissionCodigo',
+          'lat', 'lng', 'accuracyMeters', 'speedKmh', 'enComision', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid) && data.uid == locationId
+        && isValidId(data.ownerId) && data.ownerId == data.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.commissionId is string && data.commissionId.size() <= 128
+        && data.commissionCodigo is string && data.commissionCodigo.size() <= 40
+        && isValidGeoCoords(data.lat, data.lng)
+        && data.accuracyMeters is number && data.accuracyMeters >= 0 && data.accuracyMeters <= 50000
+        && data.speedKmh is number && data.speedKmh >= 0 && data.speedKmh <= 500
+        && data.enComision is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCommission(data) {
+      return data.keys().hasAll([
+          'ownerId', 'codigo', 'nombre', 'modalidad', 'estado',
+          'jefeGrado', 'jefeNombre', 'jefeCedula', 'jefeTelefono',
+          'efectivos', 'vehiculoTipo', 'vehiculoPlaca', 'armamento',
+          'sector', 'lat', 'lng', 'alertaApoyo', 'motivoAlerta', 'notas',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'codigo', 'nombre', 'modalidad', 'estado',
+          'jefeGrado', 'jefeNombre', 'jefeCedula', 'jefeTelefono',
+          'efectivos', 'vehiculoTipo', 'vehiculoPlaca', 'armamento',
+          'sector', 'cuadrantePaz', 'destacamento', 'compania', 'puesto',
+          'lat', 'lng', 'alertaApoyo', 'motivoAlerta', 'notas',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.codigo is string && data.codigo.size() >= 2 && data.codigo.size() <= 32
+        && data.nombre is string && data.nombre.size() >= 2 && data.nombre.size() <= 120
+        && data.modalidad in ['terrestre', 'lacustre']
+        && data.estado in ['activa', 'en_curso', 'apoyo_requerido', 'finalizada']
+        && data.jefeGrado is string && data.jefeGrado.size() >= 1 && data.jefeGrado.size() <= 40
+        && data.jefeNombre is string && data.jefeNombre.size() >= 2 && data.jefeNombre.size() <= 100
+        && data.jefeCedula is string && data.jefeCedula.size() >= 4 && data.jefeCedula.size() <= 24
+        && isValidPhone(data.jefeTelefono)
+        && data.efectivos is list && data.efectivos.size() >= 1 && data.efectivos.size() <= 20
+        && isValidPersonnelEntry(data.efectivos[0])
+        && data.vehiculoTipo is string && data.vehiculoTipo.size() >= 2 && data.vehiculoTipo.size() <= 80
+        && data.vehiculoPlaca is string && data.vehiculoPlaca.size() >= 2 && data.vehiculoPlaca.size() <= 32
+        && data.armamento is list && data.armamento.size() >= 1 && data.armamento.size() <= 20
+        && isValidWeaponEntry(data.armamento[0])
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && (!('cuadrantePaz' in data) || (data.cuadrantePaz is string && data.cuadrantePaz.size() <= 40))
+        && (!('destacamento' in data) || isValidDestacamento(data.destacamento))
+        && (!('compania' in data) || (data.compania is string && data.compania.size() <= 100))
+        && (!('puesto' in data) || (data.puesto is string && data.puesto.size() <= 100))
+        && isValidTrujilloCoords(data.lat, data.lng)
+        && data.alertaApoyo is bool
+        && data.motivoAlerta is string && data.motivoAlerta.size() <= 300
+        && data.notas is string && data.notas.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidIncident(data) {
+      return data.keys().hasAll([
+          'ownerId', 'titulo', 'tipo', 'severidad', 'modalidad',
+          'sector', 'municipio', 'descripcion', 'commissionId',
+          'reportadoPor', 'lat', 'lng', 'estado', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'titulo', 'tipo', 'severidad', 'modalidad',
+          'sector', 'municipio', 'cuadrantePaz', 'destacamento', 'compania', 'puesto',
+          'descripcion', 'commissionId',
+          'reportadoPor', 'lat', 'lng', 'estado',
+          'fallecidos', 'lesionados', 'vehiculosInvolucrados',
+          'causaProbable', 'viaAfectada', 'placasInvolucradas',
+          'servicioPublico', 'personasConcentradas', 'pasoHabilitado',
+          'fotoDataUrl', 'fotoCoordenadas',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.titulo is string && data.titulo.size() >= 3 && data.titulo.size() <= 120
+        && data.tipo in [
+          'homicidio', 'femicidio', 'lesiones_graves', 'enfrentamiento', 'secuestro',
+          'extorsion', 'abigeato', 'pirateria_lacustre', 'robo', 'hurto_vehiculo', 'trafico', 'sospechoso',
+          'accidente_colision', 'accidente_volcamiento', 'accidente_arrollamiento', 'accidente_moto', 'obstruccion_vial', 'infraccion_vial_grave',
+          'tala_ilegal', 'incendio_forestal', 'mineria_ilegal', 'contaminacion_hidrica', 'trafico_fauna', 'desechos_toxicos',
+          'manifestacion_pacifica', 'manifestacion_violenta', 'cierre_via_servicios', 'cierre_via_gremial', 'falla_servicio_critico'
+        ]
+        && data.severidad in ['baja', 'media', 'alta', 'critica']
+        && data.modalidad in ['terrestre', 'lacustre']
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && data.municipio is string && data.municipio.size() >= 2 && data.municipio.size() <= 80
+        && (!('cuadrantePaz' in data) || (data.cuadrantePaz is string && data.cuadrantePaz.size() <= 40))
+        && (!('destacamento' in data) || isValidDestacamento(data.destacamento))
+        && (!('compania' in data) || (data.compania is string && data.compania.size() <= 100))
+        && (!('puesto' in data) || (data.puesto is string && data.puesto.size() <= 100))
+        && data.descripcion is string && data.descripcion.size() >= 3 && data.descripcion.size() <= 600
+        && data.commissionId is string && data.commissionId.size() <= 128
+        && data.reportadoPor is string && data.reportadoPor.size() >= 2 && data.reportadoPor.size() <= 100
+        && isValidGeoCoords(data.lat, data.lng)
+        && data.estado in ['abierta', 'en_atencion', 'cerrada']
+        && (!('fallecidos' in data) || (data.fallecidos is int && data.fallecidos >= 0 && data.fallecidos <= 200))
+        && (!('lesionados' in data) || (data.lesionados is int && data.lesionados >= 0 && data.lesionados <= 500))
+        && (!('vehiculosInvolucrados' in data) || (data.vehiculosInvolucrados is int && data.vehiculosInvolucrados >= 0 && data.vehiculosInvolucrados <= 50))
+        && (!('causaProbable' in data) || (data.causaProbable is string && data.causaProbable.size() <= 140))
+        && (!('viaAfectada' in data) || (data.viaAfectada is string && data.viaAfectada.size() <= 120))
+        && (!('placasInvolucradas' in data) || (data.placasInvolucradas is string && data.placasInvolucradas.size() <= 120))
+        && (!('servicioPublico' in data) || (data.servicioPublico is string && data.servicioPublico.size() <= 80))
+        && (!('personasConcentradas' in data) || (data.personasConcentradas is int && data.personasConcentradas >= 0 && data.personasConcentradas <= 50000))
+        && (!('pasoHabilitado' in data) || data.pasoHabilitado in ['cerrado_total', 'paso_parcial', 'paso_intermitente', 'via_libre'])
+        && (!('fotoDataUrl' in data) || isValidGeoPhoto(data.fotoDataUrl))
+        && (!('fotoCoordenadas' in data) || (data.fotoCoordenadas is string && data.fotoCoordenadas.size() <= 140))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPatrolPoint(data) {
+      return data.keys().hasAll([
+          'ownerId', 'titulo', 'sector', 'municipio', 'modalidad',
+          'commissionId', 'patrulladoPor', 'condicionSector', 'flujoVehicular',
+          'iluminacion', 'caracteristicasVistas', 'lat', 'lng',
+          'fotoDataUrl', 'fotoCoordenadas', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'titulo', 'sector', 'municipio', 'cuadrantePaz',
+          'destacamento', 'compania', 'puesto', 'modalidad',
+          'commissionId', 'patrulladoPor', 'condicionSector', 'flujoVehicular',
+          'iluminacion', 'caracteristicasVistas', 'lat', 'lng',
+          'fotoDataUrl', 'fotoCoordenadas', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.titulo is string && data.titulo.size() >= 3 && data.titulo.size() <= 120
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && data.municipio is string && data.municipio.size() >= 2 && data.municipio.size() <= 80
+        && (!('cuadrantePaz' in data) || (data.cuadrantePaz is string && data.cuadrantePaz.size() <= 40))
+        && (!('destacamento' in data) || isValidDestacamento(data.destacamento))
+        && (!('compania' in data) || (data.compania is string && data.compania.size() <= 100))
+        && (!('puesto' in data) || (data.puesto is string && data.puesto.size() <= 100))
+        && data.modalidad in ['terrestre', 'lacustre']
+        && data.commissionId is string && data.commissionId.size() <= 128
+        && data.patrulladoPor is string && data.patrulladoPor.size() >= 2 && data.patrulladoPor.size() <= 100
+        && data.condicionSector in ['sin_novedad', 'control_vial', 'manifestacion_cierre', 'actividad_sospechosa', 'presencia_irregular', 'via_obstruida', 'riesgo_alto']
+        && data.flujoVehicular in ['nulo', 'bajo', 'moderado', 'alto']
+        && data.iluminacion in ['diurno', 'buena', 'deficiente', 'nula']
+        && data.caracteristicasVistas is string && data.caracteristicasVistas.size() >= 3 && data.caracteristicasVistas.size() <= 700
+        && isValidGeoCoords(data.lat, data.lng)
+        && isValidGeoPhoto(data.fotoDataUrl)
+        && data.fotoCoordenadas is string && data.fotoCoordenadas.size() <= 140
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGangZone(data) {
+      return data.keys().hasAll([
+          'ownerId', 'nombre', 'alias', 'nivelAmenaza', 'modalidad',
+          'sector', 'delitos', 'recomendacionTactica',
+          'lat', 'lng', 'radioKm', 'activa', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'nombre', 'alias', 'nivelAmenaza', 'modalidad',
+          'sector', 'delitos', 'recomendacionTactica',
+          'lat', 'lng', 'radioKm', 'activa', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.nombre is string && data.nombre.size() >= 2 && data.nombre.size() <= 100
+        && data.alias is string && data.alias.size() <= 100
+        && data.nivelAmenaza in ['moderado', 'alto', 'critico']
+        && data.modalidad in ['terrestre', 'lacustre', 'mixta']
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && data.delitos is list && data.delitos.size() >= 1 && data.delitos.size() <= 8
+        && data.delitos[0] is string && data.delitos[0].size() >= 2 && data.delitos[0].size() <= 80
+        && data.recomendacionTactica is string && data.recomendacionTactica.size() >= 5 && data.recomendacionTactica.size() <= 600
+        && isValidTrujilloCoords(data.lat, data.lng)
+        && data.radioKm is number && data.radioKm >= 1 && data.radioKm <= 40
+        && data.activa is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendlyForce(data) {
+      return data.keys().hasAll([
+          'ownerId', 'nombre', 'organismo', 'sector', 'telefono',
+          'frecuenciaRadio', 'capacidad', 'lat', 'lng', 'disponible',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'nombre', 'organismo', 'sector', 'telefono',
+          'frecuenciaRadio', 'capacidad', 'lat', 'lng', 'disponible',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.nombre is string && data.nombre.size() >= 2 && data.nombre.size() <= 120
+        && data.organismo in ['PNB', 'CICPC', 'POLICIA_ESTADAL', 'POLICIA_MUNICIPAL', 'CONAS', 'GNB', 'GUARDACOSTAS']
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && isValidPhone(data.telefono)
+        && data.frecuenciaRadio is string && data.frecuenciaRadio.size() <= 40
+        && data.capacidad is string && data.capacidad.size() >= 2 && data.capacidad.size() <= 150
+        && isValidTrujilloCoords(data.lat, data.lng)
+        && data.disponible is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidZoneUnit(data) {
+      return data.keys().hasAll([
+          'ownerId', 'codigo', 'nombre', 'nivel', 'destacamento', 'compania',
+          'municipio', 'sector', 'modalidad', 'comandante', 'telefono',
+          'frecuenciaRadio', 'efectivosGuardia', 'estadoOperativo',
+          'lat', 'lng', 'notas', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'codigo', 'nombre', 'nivel', 'destacamento', 'compania',
+          'municipio', 'sector', 'modalidad', 'comandante', 'telefono',
+          'frecuenciaRadio', 'efectivosGuardia', 'estadoOperativo',
+          'lat', 'lng', 'notas', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.codigo is string && data.codigo.size() >= 2 && data.codigo.size() <= 32
+        && data.nombre is string && data.nombre.size() >= 2 && data.nombre.size() <= 120
+        && data.nivel in ['comando_zona', 'destacamento', 'compania', 'puesto_pac']
+        && isValidDestacamento(data.destacamento)
+        && data.compania is string && data.compania.size() <= 100
+        && data.municipio is string && data.municipio.size() >= 2 && data.municipio.size() <= 80
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && data.modalidad in ['terrestre', 'lacustre', 'mixta']
+        && data.comandante is string && data.comandante.size() <= 100
+        && data.telefono is string && (data.telefono == '' || isValidPhone(data.telefono))
+        && data.frecuenciaRadio is string && data.frecuenciaRadio.size() <= 40
+        && data.efectivosGuardia is int && data.efectivosGuardia >= 0 && data.efectivosGuardia <= 500
+        && data.estadoOperativo in ['operativo', 'alerta', 'reforzado', 'inactivo']
+        && isValidTrujilloCoords(data.lat, data.lng)
+        && data.notas is string && data.notas.size() <= 400
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWantedRecord(data) {
+      return data.keys().hasAll([
+          'ownerId', 'tipo', 'identificador', 'nombreDescripcion', 'aliasOSecundario',
+          'delito', 'expediente', 'organismoSolicitante', 'peligrosidad', 'estado',
+          'notas', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'tipo', 'identificador', 'nombreDescripcion', 'aliasOSecundario',
+          'delito', 'expediente', 'organismoSolicitante', 'peligrosidad', 'estado',
+          'notas', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.tipo in ['persona', 'vehiculo']
+        && data.identificador is string && data.identificador.size() >= 2 && data.identificador.size() <= 48
+        && data.nombreDescripcion is string && data.nombreDescripcion.size() >= 2 && data.nombreDescripcion.size() <= 120
+        && data.aliasOSecundario is string && data.aliasOSecundario.size() <= 100
+        && data.delito is string && data.delito.size() >= 2 && data.delito.size() <= 120
+        && data.expediente is string && data.expediente.size() >= 2 && data.expediente.size() <= 80
+        && data.organismoSolicitante is string && data.organismoSolicitante.size() >= 2 && data.organismoSolicitante.size() <= 100
+        && data.peligrosidad in ['media', 'alta', 'extrema']
+        && data.estado in ['solicitado', 'capturado_recuperado']
+        && data.notas is string && data.notas.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVerificationLog(data) {
+      return data.keys().hasAll([
+          'ownerId', 'tipo', 'identificador', 'nombreDescripcion', 'datoSecundario',
+          'conductorAsociado', 'resultado', 'wantedRecordId', 'motivoRequerimiento',
+          'commissionId', 'verificadoPor', 'sector', 'lat', 'lng',
+          'observaciones', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'tipo', 'identificador', 'nombreDescripcion', 'datoSecundario',
+          'conductorAsociado', 'resultado', 'wantedRecordId', 'motivoRequerimiento',
+          'commissionId', 'verificadoPor', 'sector', 'lat', 'lng',
+          'observaciones', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.tipo in ['persona', 'vehiculo']
+        && data.identificador is string && data.identificador.size() >= 2 && data.identificador.size() <= 48
+        && data.nombreDescripcion is string && data.nombreDescripcion.size() >= 2 && data.nombreDescripcion.size() <= 120
+        && data.datoSecundario is string && data.datoSecundario.size() <= 120
+        && data.conductorAsociado is string && data.conductorAsociado.size() <= 120
+        && data.resultado in ['sin_novedad', 'solicitado', 'observacion_tactica', 'retenido']
+        && data.wantedRecordId is string && data.wantedRecordId.size() <= 128
+        && data.motivoRequerimiento is string && data.motivoRequerimiento.size() <= 220
+        && data.commissionId is string && data.commissionId.size() <= 128
+        && data.verificadoPor is string && data.verificadoPor.size() >= 2 && data.verificadoPor.size() <= 100
+        && data.sector is string && data.sector.size() >= 2 && data.sector.size() <= 100
+        && isValidGeoCoords(data.lat, data.lng)
+        && data.observaciones is string && data.observaciones.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+          'ownerId', 'actorUid', 'actorEmail', 'actorNombre', 'actorGrado',
+          'actorCedula', 'accion', 'entidad', 'entidadId', 'resumen',
+          'severidad', 'dispositivo', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'actorUid', 'actorEmail', 'actorNombre', 'actorGrado',
+          'actorCedula', 'accion', 'entidad', 'entidadId', 'resumen',
+          'severidad', 'dispositivo', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && isValidId(data.actorUid)
+        && data.actorUid == data.ownerId
+        && data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 150
+        && data.actorNombre is string && data.actorNombre.size() >= 1 && data.actorNombre.size() <= 100
+        && data.actorGrado is string && data.actorGrado.size() <= 40
+        && data.actorCedula is string && data.actorCedula.size() <= 24
+        && data.accion in [
+          'sesion_inicio', 'sesion_cierre', 'perfil_registrado',
+          'crear', 'editar', 'eliminar', 'alerta_sos', 'gps_estado', 'cambio_estado',
+          'acceso_aprobado', 'acceso_expulsado', 'acceso_rehabilitado',
+          'acceso_por_codigo', 'codigo_secreto_creado', 'codigo_secreto_revocado',
+          'cambio_privilegio'
+        ]
+        && data.entidad in [
+          'sesion', 'perfil', 'commission', 'incident', 'patrolPoint',
+          'gangZone', 'friendlyForce', 'zoneUnit', 'wantedRecord', 'verificationLog',
+          'acceso', 'codigo_secreto'
+        ]
+        && data.entidadId is string && data.entidadId.size() <= 128
+        && data.resumen is string && data.resumen.size() >= 2 && data.resumen.size() <= 300
+        && data.severidad in ['normal', 'sensible', 'alerta_mal_uso']
+        && data.dispositivo is string && data.dispositivo.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Rules (Zero-Trust Access Gate + Privilege RBAC)
+    // =========================================================================
+
+    // Admins registry (server/console managed only)
+    match /admins/{adminId} {
+      allow get: if isVerified() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, create, update, delete: if false;
+    }
+
+    // Secret Authorization Codes (SHA-256 hash-indexed; readable ONLY by Admin)
+    match /accessCodes/{codeHash} {
+      allow get: if isAdmin() && isValidCodeHash(codeHash);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidCodeHash(codeHash)
+        && isValidAccessCode(incoming(), codeHash)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdByEmail == request.auth.token.email
+        && incoming().usedCount == 0
+        && incoming().lastUsedByUid == ''
+        && incoming().lastUsedByEmail == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidCodeHash(codeHash)
+        && isValidAccessCode(incoming(), codeHash)
+        && incoming().codeHash == existing().codeHash
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdByEmail == existing().createdByEmail
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Tier 1: Command Admin revokes/reactivates or edits label/maxUses
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['active', 'label', 'maxUses', 'updatedAt'])
+          )
+          // Tier 2: Pending officer atomically redeems a valid active secret code
+          || (
+            isVerified()
+            && existing().active == true
+            && existing().usedCount < existing().maxUses
+            && incoming().usedCount == existing().usedCount + 1
+            && incoming().lastUsedByUid == request.auth.uid
+            && incoming().lastUsedByEmail == request.auth.token.email
+            && incoming().diff(existing()).affectedKeys().hasOnly(['usedCount', 'lastUsedByUid', 'lastUsedByEmail', 'updatedAt'])
+            && exists(/databases/$(database)/documents/officers/$(request.auth.uid))
+            && (
+              !('accessStatus' in get(/databases/$(database)/documents/officers/$(request.auth.uid)).data)
+              || get(/databases/$(database)/documents/officers/$(request.auth.uid)).data.accessStatus == 'pendiente'
+            )
+            && getAfter(/databases/$(database)/documents/officers/$(request.auth.uid)).data.accessStatus == 'autorizado'
+            && getAfter(/databases/$(database)/documents/officers/$(request.auth.uid)).data.authorizedCodeHash == codeHash
+          )
+        );
+      allow delete: if isAdmin() && isValidCodeHash(codeHash);
+    }
+
+    // Officers (PII isolated per UID; accessStatus & privilegio strictly Admin-controlled)
+    match /officers/{officerId} {
+      allow get: if isVerified() && isValidId(officerId) && (request.auth.uid == officerId || isAdmin());
+      allow list: if isVerified() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerified()
+        && isValidId(officerId)
+        && request.auth.uid == officerId
+        && isValidOfficer(incoming(), officerId)
+        && incoming().email == request.auth.token.email
+        && (!('lastLoginAt' in incoming()) || incoming().lastLoginAt == request.time)
+        && (!('loginCount' in incoming()) || incoming().loginCount == 1)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isBootstrappedAdmin()
+            && incoming().accessStatus == 'autorizado'
+            && (!('privilegio' in incoming()) || incoming().privilegio == 'administrador')
+          )
+          || (
+            !isBootstrappedAdmin()
+            && incoming().accessStatus == 'pendiente'
+            && (!('privilegio' in incoming()) || incoming().privilegio in ['consulta', 'operador'])
+            && !('privilegioActualizadoPor' in incoming())
+            && !('privilegioActualizadoAt' in incoming())
+            && (!('authorizedBy' in incoming()) || incoming().authorizedBy == '')
+            && (!('authorizedCodeHash' in incoming()) || incoming().authorizedCodeHash == '')
+            && (!('authorizedAt' in incoming()))
+            && (!('expulsadoMotivo' in incoming()) || incoming().expulsadoMotivo == '')
+            && (!('expulsadoPor' in incoming()) || incoming().expulsadoPor == '')
+            && (!('expulsadoAt' in incoming()))
+          )
+        );
+      allow update: if isVerified()
+        && isValidId(officerId)
+        && isValidOfficer(incoming(), officerId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Self-update of profile/request info (blocked if expelled; CANNOT touch accessStatus or privilegio)
+          (
+            request.auth.uid == officerId
+            && incoming().email == request.auth.token.email
+            && (!('accessStatus' in existing()) || existing().accessStatus != 'expulsado')
+            && (!('lastLoginAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastLoginAt == request.time)
+            && (
+              !('loginCount' in incoming().diff(existing()).affectedKeys())
+              || (
+                (!('loginCount' in existing()) && incoming().loginCount == 1)
+                || ('loginCount' in existing() && incoming().loginCount == existing().loginCount + 1)
+              )
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'email', 'unit',
+              'destacamento', 'compania', 'puesto',
+              'grado', 'cedula', 'telefono', 'cargo', 'perfilCompleto',
+              'solicitudNota', 'lastLoginAt', 'loginCount', 'updatedAt'
+            ])
+          )
+          // Action 2: Pending officer atomically redeems a valid Admin Secret Code (lands in standard user mode)
+          || (
+            request.auth.uid == officerId
+            && incoming().email == existing().email
+            && (!('accessStatus' in existing()) || existing().accessStatus == 'pendiente')
+            && incoming().accessStatus == 'autorizado'
+            && incoming().authorizedBy == 'codigo_secreto'
+            && isValidCodeHash(incoming().authorizedCodeHash)
+            && incoming().authorizedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'accessStatus', 'authorizedBy', 'authorizedCodeHash', 'authorizedAt', 'updatedAt'
+            ])
+            && exists(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash))
+            && get(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash)).data.active == true
+            && get(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash)).data.usedCount
+               < get(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash)).data.maxUses
+            && getAfter(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash)).data.usedCount
+               == get(/databases/$(database)/documents/accessCodes/$(incoming().authorizedCodeHash)).data.usedCount + 1
+          )
+          // Action 3: Command Admin approves, expels, rehabilitates, or changes user privilege
+          || (
+            isAdmin()
+            && incoming().email == existing().email
+            && !(
+              'accessStatus' in incoming().diff(existing()).affectedKeys()
+              && incoming().accessStatus == 'expulsado'
+              && (
+                officerId == request.auth.uid
+                || existing().email == 'donrafan@gmail.com'
+                || (!isBootstrappedAdmin() && 'privilegio' in existing() && existing().privilegio == 'administrador')
+              )
+            )
+            && !(existing().email == 'donrafan@gmail.com' && 'privilegio' in incoming() && incoming().privilegio != 'administrador')
+            && (
+              !('privilegio' in incoming().diff(existing()).affectedKeys())
+              || (
+                incoming().privilegioActualizadoPor == request.auth.token.email
+                && incoming().privilegioActualizadoAt == request.time
+                && (
+                  (isBootstrappedAdmin() && (officerId != request.auth.uid || incoming().privilegio == 'administrador'))
+                  || (
+                    officerId != request.auth.uid
+                    && incoming().privilegio != 'administrador'
+                    && (!('privilegio' in existing()) || existing().privilegio != 'administrador')
+                  )
+                )
+              )
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'accessStatus', 'authorizedBy', 'authorizedAt',
+              'privilegio', 'privilegioActualizadoPor', 'privilegioActualizadoAt',
+              'expulsadoMotivo', 'expulsadoPor', 'expulsadoAt', 'updatedAt'
+            ])
+            && (
+              !('accessStatus' in incoming().diff(existing()).affectedKeys())
+              || incoming().accessStatus != 'autorizado'
+              || incoming().authorizedAt == request.time
+            )
+            && (
+              !('accessStatus' in incoming().diff(existing()).affectedKeys())
+              || incoming().accessStatus != 'expulsado'
+              || (incoming().expulsadoAt == request.time && incoming().expulsadoPor == request.auth.token.email)
+            )
+          )
+        );
+      allow delete: if false;
+    }
+
+    // Real-time User GPS Locations while on Commission (Shared Read: Authorized Officers | Write: Self Field Operators+ / Admin)
+    match /liveLocations/{locationId} {
+      allow get: if isVerified() && isValidId(locationId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canOperateField()
+        && isValidId(locationId)
+        && request.auth.uid == locationId
+        && isValidLiveLocation(incoming(), locationId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canOperateField()
+        && isValidId(locationId)
+        && isValidLiveLocation(incoming(), locationId)
+        && incoming().uid == existing().uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isOwner(existing().ownerId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'commissionId', 'commissionCodigo',
+              'lat', 'lng', 'accuracyMeters', 'speedKmh', 'enComision', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if canOperateField() && isValidId(locationId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Operational Commissions (Shared Read: Authorized Officers | Create/Self-Edit: Field Operators+ | Moderate/Delete: Supervisor/Admin)
+    match /commissions/{commissionId} {
+      allow get: if isVerified() && isValidId(commissionId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canOperateField()
+        && isValidId(commissionId)
+        && isValidCommission(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canOperateField()
+        && isValidId(commissionId)
+        && isValidCommission(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && existing().estado != 'finalizada'
+            && (
+              // Action 1: Live GPS / Location Update
+              incoming().diff(existing()).affectedKeys().hasOnly(['lat', 'lng', 'sector', 'updatedAt'])
+              // Action 2: Support Alert Toggle (SOS)
+              || incoming().diff(existing()).affectedKeys().hasOnly(['alertaApoyo', 'motivoAlerta', 'estado', 'updatedAt'])
+              // Action 3: Full Operational Edit / Status Transition
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'codigo', 'nombre', 'modalidad', 'estado',
+                'jefeGrado', 'jefeNombre', 'jefeCedula', 'jefeTelefono',
+                'efectivos', 'vehiculoTipo', 'vehiculoPlaca', 'armamento',
+                'sector', 'cuadrantePaz', 'destacamento', 'compania', 'puesto',
+                'lat', 'lng', 'alertaApoyo', 'motivoAlerta', 'notas', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if canEditCatalogs() && isValidId(commissionId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Crime Map Incidents (Shared Read: Authorized Officers | Create/Self-Edit: Field Operators+ | Moderate/Delete: Supervisor/Admin)
+    match /incidents/{incidentId} {
+      allow get: if isVerified() && isValidId(incidentId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canOperateField()
+        && isValidId(incidentId)
+        && isValidIncident(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canOperateField()
+        && isValidId(incidentId)
+        && isValidIncident(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && existing().estado != 'cerrada'
+            && (
+              // Action 1: Status / Road Clearance Update
+              incoming().diff(existing()).affectedKeys().hasOnly(['estado', 'updatedAt'])
+              || incoming().diff(existing()).affectedKeys().hasOnly(['estado', 'pasoHabilitado', 'updatedAt'])
+              // Action 2: Full Incident Edit
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'titulo', 'tipo', 'severidad', 'modalidad', 'sector', 'municipio', 'cuadrantePaz',
+                'destacamento', 'compania', 'puesto',
+                'descripcion', 'commissionId', 'reportadoPor', 'lat', 'lng', 'estado',
+                'fallecidos', 'lesionados', 'vehiculosInvolucrados',
+                'causaProbable', 'viaAfectada', 'placasInvolucradas',
+                'servicioPublico', 'personasConcentradas', 'pasoHabilitado',
+                'fotoDataUrl', 'fotoCoordenadas', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if canEditCatalogs() && isValidId(incidentId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Patrolled Checkpoints (Shared Read: Authorized Officers | Create/Self-Edit: Field Operators+ | Moderate/Delete: Supervisor/Admin)
+    match /patrolPoints/{pointId} {
+      allow get: if isVerified() && isValidId(pointId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canOperateField()
+        && isValidId(pointId)
+        && isValidPatrolPoint(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canOperateField()
+        && isValidId(pointId)
+        && isValidPatrolPoint(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'titulo', 'sector', 'municipio', 'cuadrantePaz',
+              'destacamento', 'compania', 'puesto',
+              'modalidad', 'commissionId',
+              'patrulladoPor', 'condicionSector', 'flujoVehicular', 'iluminacion',
+              'caracteristicasVistas', 'lat', 'lng', 'fotoDataUrl', 'fotoCoordenadas', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if canEditCatalogs() && isValidId(pointId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Criminal Gang Operating Zones / GEDOs (Shared Command Intelligence: Read All Authorized | Create/Self-Edit Operators+ | Moderate Supervisor/Admin)
+    match /gangZones/{zoneId} {
+      allow get: if isVerified() && isValidId(zoneId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if isVerified()
+        && isValidId(zoneId)
+        && isValidGangZone(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && canOperateField();
+      allow update: if isVerified()
+        && isValidId(zoneId)
+        && isValidGangZone(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && canOperateField()
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && (
+              // Action 1: Toggle active status
+              incoming().diff(existing()).affectedKeys().hasOnly(['activa', 'updatedAt'])
+              // Action 2: Edit zone intelligence
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'nombre', 'alias', 'nivelAmenaza', 'modalidad', 'sector',
+                'delitos', 'recomendacionTactica', 'lat', 'lng', 'radioKm', 'activa', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() && isValidId(zoneId) && canEditCatalogs() && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Allied / Friendly Forces (Shared Command Intelligence: Read All Authorized | Create/Self-Edit Operators+ | Moderate Supervisor/Admin)
+    match /friendlyForces/{forceId} {
+      allow get: if isVerified() && isValidId(forceId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if isVerified()
+        && isValidId(forceId)
+        && isValidFriendlyForce(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && canOperateField();
+      allow update: if isVerified()
+        && isValidId(forceId)
+        && isValidFriendlyForce(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && canOperateField()
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && (
+              // Action 1: Availability toggle
+              incoming().diff(existing()).affectedKeys().hasOnly(['disponible', 'updatedAt'])
+              // Action 2: Full friendly force edit
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'nombre', 'organismo', 'sector', 'telefono', 'frecuenciaRadio',
+                'capacidad', 'lat', 'lng', 'disponible', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() && isValidId(forceId) && canEditCatalogs() && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // CZGNB-23 Organic Units (Shared Command Catalog: HQ, 3 Destacamentos, Companias, Puestos/PACs)
+    match /zoneUnits/{unitId} {
+      allow get: if isVerified() && isValidId(unitId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if isVerified()
+        && isValidId(unitId)
+        && isValidZoneUnit(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && canOperateField();
+      allow update: if isVerified()
+        && isValidId(unitId)
+        && isValidZoneUnit(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && canOperateField()
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && (
+              // Action 1: Operational status toggle
+              incoming().diff(existing()).affectedKeys().hasOnly(['estadoOperativo', 'updatedAt'])
+              // Action 2: Full unit / post edit
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'codigo', 'nombre', 'nivel', 'destacamento', 'compania',
+                'municipio', 'sector', 'modalidad', 'comandante', 'telefono',
+                'frecuenciaRadio', 'efectivosGuardia', 'estadoOperativo',
+                'lat', 'lng', 'notas', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() && isValidId(unitId) && canEditCatalogs() && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Judicial Wanted Persons & Stolen/Wanted Vehicles Registry (Shared Read: Authorized Officers | Write: Supervisor/Admin)
+    match /wantedRecords/{recordId} {
+      allow get: if isVerified() && isValidId(recordId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canEditCatalogs()
+        && isValidId(recordId)
+        && isValidWantedRecord(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canEditCatalogs()
+        && isValidId(recordId)
+        && isValidWantedRecord(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && (
+              // Action 1: Toggle wanted / captured-recovered status
+              incoming().diff(existing()).affectedKeys().hasOnly(['estado', 'updatedAt'])
+              // Action 2: Full wanted record edit
+              || incoming().diff(existing()).affectedKeys().hasOnly([
+                'tipo', 'identificador', 'nombreDescripcion', 'aliasOSecundario',
+                'delito', 'expediente', 'organismoSolicitante', 'peligrosidad',
+                'estado', 'notas', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if canEditCatalogs() && isValidId(recordId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Verified Persons & Vehicles Historical Database (Shared Read: Authorized Officers | Write: Field Operators+ | Delete: Supervisor/Admin)
+    match /verificationLogs/{logId} {
+      allow get: if isVerified() && isValidId(logId) && isAuthorizedOfficer();
+      allow list: if isVerified() && isAuthorizedOfficer();
+      allow create: if canOperateField()
+        && isValidId(logId)
+        && isValidVerificationLog(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if canOperateField()
+        && isValidId(logId)
+        && isValidVerificationLog(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            (isOwner(existing().ownerId) || canEditCatalogs())
+            && (
+              // Action 1: Update verification result / tactical notes
+              incoming().diff(existing()).affectedKeys().hasOnly(['resultado', 'observaciones', 'updatedAt'])
+              // Action 2: Update result only
+              || incoming().diff(existing()).affectedKeys().hasOnly(['resultado', 'updatedAt'])
+            )
+          )
+        );
+      allow delete: if canEditCatalogs() && isValidId(logId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // Immutable User Activity & Misuse Audit Log (Strictly Append-Only, Authorized Officers Only)
+    match /auditLogs/{logId} {
+      allow get: if isAuthorizedOfficer() && isValidId(logId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isAuthorizedOfficer() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isAuthorizedOfficer()
+        && isValidId(logId)
+        && isValidAuditLog(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().actorUid == request.auth.uid
+        && incoming().actorEmail == request.auth.token.email
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}
